@@ -1,7 +1,7 @@
 name: oidc-check
 
 # Proves each student's OIDC trust policy works: for every handle in handles.txt,
-# request a GitHub OIDC token, try to assume floe-training-<handle>, and list the
+# request a GitHub OIDC token, try to assume oidc-lab-<handle>, and list the
 # shared lab bucket. A job that succeeds = that student's trust policy is correct.
 #
 # Runs on a schedule so the read-only Pages site always has a fresh result to
@@ -19,7 +19,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  LAB_BUCKET: floe-training-lab
+  LAB_BUCKET: oidc-lab-bucket
 
 jobs:
   # Read handles.txt and emit a JSON array the matrix can fan out over.
@@ -47,10 +47,10 @@ jobs:
     # result by name without parsing logs.
     name: "check (${{ matrix.handle }})"
     steps:
-      - name: Assume floe-training-${{ matrix.handle }} over OIDC
+      - name: Assume oidc-lab-${{ matrix.handle }} over OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::997880307006:role/floe-training-${{ matrix.handle }}
+          role-to-assume: arn:aws:iam::997880307006:role/oidc-lab-${{ matrix.handle }}
           aws-region: ${{ env.AWS_REGION }}
       - name: Prove access by reading the lab bucket
         run: |

@@ -124,7 +124,7 @@
   async function check(handle) {
     $("result").classList.remove("hidden");
     $("handleEcho").textContent = handle;
-    $("roleArn").textContent = `arn:aws:iam::${ACCOUNT}:role/floe-training-${handle}`;
+    $("roleArn").textContent = `arn:aws:iam::${ACCOUNT}:role/oidc-lab-${handle}`;
     $("provArn").textContent = PROVIDER_ARN;
     $("subClaim").textContent = SUB;
     $("trustJson").textContent = trustPolicy(handle);
@@ -144,9 +144,9 @@
       if (job.status !== "completed") {
         setStatus("amber", "Running…", `A check is in progress (run started ${when}).`);
       } else if (job.conclusion === "success") {
-        setStatus("green", "Green — your trust policy works", `The Action assumed floe-training-${handle} and read the bucket (run ${when}).`);
+        setStatus("green", "Green — your trust policy works", `The Action assumed oidc-lab-${handle} and read the bucket (run ${when}).`);
       } else {
-        setStatus("red", "Red — not yet", `The Action could not assume floe-training-${handle} (run ${when}). Check the federated principal and the sub condition.`);
+        setStatus("red", "Red — not yet", `The Action could not assume oidc-lab-${handle} (run ${when}). Check the federated principal and the sub condition.`);
       }
     } catch (e) {
       setStatus("amber", "Couldn't read results", String(e.message || e));

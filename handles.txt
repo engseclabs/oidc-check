@@ -6,4 +6,3 @@
 # (Empty for now — the end-to-end OIDC path was validated with `smoketest` and
 # that role was torn down, so no handle is listed. Add real attendees here and
 # re-apply the Terraform before class.)
-smoketest

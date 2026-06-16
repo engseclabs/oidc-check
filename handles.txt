@@ -3,4 +3,6 @@
 # to assume floe-training-<handle> over OIDC. Lines starting with # are ignored.
 #
 # Add the smoketest handle while validating, then real attendees before class.
-smoketest
+# (Empty for now — the end-to-end OIDC path was validated with `smoketest` and
+# that role was torn down, so no handle is listed. Add real attendees here and
+# re-apply the lab-01-github Terraform before class.)

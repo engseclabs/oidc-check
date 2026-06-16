@@ -1,0 +1,6 @@
+# One student handle per line (email local-part, lowercased).
+# The scheduled oidc-check workflow fans out a matrix job per handle and tries
+# to assume floe-training-<handle> over OIDC. Lines starting with # are ignored.
+#
+# Add the smoketest handle while validating, then real attendees before class.
+smoketest

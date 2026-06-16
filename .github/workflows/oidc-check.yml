@@ -1,0 +1,59 @@
+name: oidc-check
+
+# Proves each student's OIDC trust policy works: for every handle in handles.txt,
+# request a GitHub OIDC token, try to assume floe-training-<handle>, and list the
+# shared lab bucket. A job that succeeds = that student's trust policy is correct.
+#
+# Runs on a schedule so the read-only Pages site always has a fresh result to
+# show (students can't dispatch this themselves on a public repo). Also
+# dispatchable by the instructor for an on-demand refresh.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *" # every 5 min; GitHub may delay scheduled runs under load
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write # required to request the OIDC token
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  LAB_BUCKET: floe-training-lab
+
+jobs:
+  # Read handles.txt and emit a JSON array the matrix can fan out over.
+  handles:
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.read.outputs.list }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        run: |
+          list=$(grep -vE '^\s*#|^\s*$' handles.txt | jq -R -s -c 'split("\n") | map(select(length>0))')
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+          echo "Handles: $list"
+
+  check:
+    needs: handles
+    runs-on: ubuntu-latest
+    if: ${{ needs.handles.outputs.list != '[]' }}
+    strategy:
+      fail-fast: false # one student's red must not hide another's green
+      matrix:
+        handle: ${{ fromJson(needs.handles.outputs.list) }}
+    # The job name carries the handle so the Pages site can find each student's
+    # result by name without parsing logs.
+    name: "check (${{ matrix.handle }})"
+    steps:
+      - name: Assume floe-training-${{ matrix.handle }} over OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::997880307006:role/floe-training-${{ matrix.handle }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Prove access by reading the lab bucket
+        run: |
+          aws sts get-caller-identity
+          aws s3 ls "s3://${LAB_BUCKET}"
+          aws s3 cp "s3://${LAB_BUCKET}/flag.txt" -

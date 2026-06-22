@@ -27,6 +27,10 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Fail fast: a wrong trust policy is the normal "red" state in this lab, and we
+    # want the page to go red in seconds, not after minutes of retries. Cheap
+    # backstop so a run can never hang.
+    timeout-minutes: 3
     # The job name carries the handle so the Pages site can find this student's
     # result by name without parsing logs.
     name: "check (${{ inputs.handle }})"
@@ -36,6 +40,9 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::857876979208:role/oidc-lab-${{ inputs.handle }}
           aws-region: ${{ env.AWS_REGION }}
+          # Default is ~12 retries over ~2 min. One attempt = red shows fast; if a
+          # student just edited their policy, they simply click Check again.
+          retry-max-attempts: 1
       - name: Prove access by reading the lab bucket
         run: |
           aws sts get-caller-identity

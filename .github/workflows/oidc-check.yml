@@ -19,7 +19,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  LAB_BUCKET: oidc-lab-bucket
+  LAB_BUCKET: authentication-training-lab-bucket
 
 jobs:
   # Read handles.txt and emit a JSON array the matrix can fan out over.
@@ -50,7 +50,7 @@ jobs:
       - name: Assume oidc-lab-${{ matrix.handle }} over OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::997880307006:role/oidc-lab-${{ matrix.handle }}
+          role-to-assume: arn:aws:iam::857876979208:role/oidc-lab-${{ matrix.handle }}
           aws-region: ${{ env.AWS_REGION }}
       - name: Prove access by reading the lab bucket
         run: |

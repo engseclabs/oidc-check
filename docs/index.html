@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Lab 01 · OIDC check</title>
+<style>
+  :root { --bg:#0d1117; --fg:#e6edf3; --muted:#8b949e; --line:#30363d;
+          --green:#2ea043; --red:#da3633; --amber:#d29922; --accent:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:16px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:32px 20px 64px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  label { display:block; font-weight:600; margin:0 0 6px; }
+  .row { display:flex; gap:8px; margin-bottom:20px; }
+  input { flex:1; background:#010409; color:var(--fg); border:1px solid var(--line);
+          border-radius:6px; padding:10px 12px; font-size:16px; }
+  button { background:var(--accent); color:#0d1117; border:0; border-radius:6px;
+           padding:10px 16px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  .card { border:1px solid var(--line); border-radius:8px; padding:16px 18px; margin:16px 0; }
+  .card h2 { font-size:14px; text-transform:uppercase; letter-spacing:.04em;
+             color:var(--muted); margin:0 0 12px; }
+  code, pre { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; }
+  pre { background:#010409; border:1px solid var(--line); border-radius:6px;
+        padding:12px; overflow:auto; }
+  .kv { margin:0 0 8px; }
+  .kv b { color:var(--muted); font-weight:600; display:inline-block; min-width:120px; }
+  .status { display:flex; align-items:center; gap:10px; font-size:18px; font-weight:600; }
+  .dot { width:14px; height:14px; border-radius:50%; background:var(--muted); flex:0 0 auto; }
+  .dot.green { background:var(--green); } .dot.red { background:var(--red); }
+  .dot.amber { background:var(--amber); animation:pulse 1.2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  a { color:var(--accent); }
+  .hint { color:var(--muted); font-size:13px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Lab 01 — OIDC check</h1>
+  <p class="sub">Enter your handle to get the values for your trust policy, then watch it go green.</p>
+
+  <label for="handle">Your handle</label>
+  <div class="row">
+    <input id="handle" placeholder="e.g. priya.shah" autocomplete="off" spellcheck="false" />
+    <button id="go">Check</button>
+  </div>
+
+  <section id="result" class="hidden">
+    <div class="card">
+      <h2>Put these in your role's trust policy</h2>
+      <div class="kv"><b>Role to allow</b> <code id="roleArn"></code></div>
+      <div class="kv"><b>Federated</b> <code id="provArn"></code></div>
+      <div class="kv"><b>aud equals</b> <code>sts.amazonaws.com</code></div>
+      <div class="kv"><b>sub like</b> <code id="subClaim"></code></div>
+      <details>
+        <summary class="hint">Show the full trust policy</summary>
+        <pre id="trustJson"></pre>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>Result for <code id="handleEcho"></code></h2>
+      <div class="status"><span id="dot" class="dot amber"></span><span id="statusText">Checking…</span></div>
+      <p class="hint" id="statusDetail"></p>
+      <p class="hint">Clicking Check starts a fresh run that tries to assume your
+        role. After you edit your trust policy, click Check again.</p>
+      <p id="runLink"></p>
+    </div>
+  </section>
+</main>
+
+<script>
+  // Public repo: the Actions API is readable with no token. Starting a run needs
+  // actions:write — we never put that token in the page (it would let anyone run
+  // arbitrary workflows on our runners). Instead we POST the handle to a small
+  // proxy that holds the token server-side and dispatches only this workflow.
+  const OWNER = "engseclabs";
+  const REPO = "oidc-check";
+  const WORKFLOW = "oidc-check.yml";
+  const DISPATCH_URL = "https://652zi1o3cf.execute-api.us-east-1.amazonaws.com/"; // injected at deploy time (the proxy Function URL)
+  const ACCOUNT = "857876979208";
+  const PROVIDER_ARN = `arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`;
+  const SUB = `repo:${OWNER}/${REPO}:*`;
+  const API = `https://api.github.com/repos/${OWNER}/${REPO}`;
+
+  const $ = (id) => document.getElementById(id);
+
+  function trustPolicy(handle) {
+    return JSON.stringify({
+      Version: "2012-10-17",
+      Statement: [{
+        Effect: "Allow",
+        Principal: { Federated: PROVIDER_ARN },
+        Action: "sts:AssumeRoleWithWebIdentity",
+        Condition: {
+          StringEquals: { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
+          StringLike: { "token.actions.githubusercontent.com:sub": SUB }
+        }
+      }]
+    }, null, 2);
+  }
+
+  function setStatus(kind, text, detail = "") {
+    $("dot").className = "dot " + kind;
+    $("statusText").textContent = text;
+    $("statusDetail").textContent = detail;
+  }
+
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  // Start a fresh run for this handle. Returns the time we dispatched, so we can
+  // find the run we just created (rather than an older one for the same handle).
+  async function dispatch(handle) {
+    const resp = await fetch(DISPATCH_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ handle })
+    });
+    if (!resp.ok) throw new Error(`dispatch failed (${resp.status}); ask your instructor`);
+  }
+
+  // Find the run for this handle created at/after `since`, and its job result.
+  async function findRun(handle, since) {
+    const resp = await fetch(`${API}/actions/workflows/${WORKFLOW}/runs?event=workflow_dispatch&per_page=20`);
+    if (!resp.ok) throw new Error(`runs API ${resp.status}`);
+    const runs = (await resp.json()).workflow_runs || [];
+    for (const run of runs) {
+      if (new Date(run.created_at).getTime() < since - 60000) continue; // skip clearly-older runs
+      const jobsResp = await fetch(`${API}/actions/runs/${run.id}/jobs?per_page=100`);
+      if (!jobsResp.ok) continue;
+      const job = ((await jobsResp.json()).jobs || []).find(j => j.name === `check (${handle})`);
+      if (job) return { run, job };
+    }
+    return null;
+  }
+
+  async function check(handle) {
+    $("result").classList.remove("hidden");
+    $("handleEcho").textContent = handle;
+    $("roleArn").textContent = `arn:aws:iam::${ACCOUNT}:role/oidc-lab-${handle}`;
+    $("provArn").textContent = PROVIDER_ARN;
+    $("subClaim").textContent = SUB;
+    $("trustJson").textContent = trustPolicy(handle);
+    $("runLink").innerHTML = "";
+    $("go").disabled = true;
+    setStatus("amber", "Starting a check…", "Triggering a run that assumes your role.");
+
+    const since = Date.now();
+    try {
+      await dispatch(handle);
+      // Poll for the run we just started, then for it to finish (~up to 2 min).
+      for (let i = 0; i < 40; i++) {
+        await sleep(3000);
+        const found = await findRun(handle, since);
+        if (!found) { setStatus("amber", "Starting a check…", "Waiting for the run to appear…"); continue; }
+        const { run, job } = found;
+        $("runLink").innerHTML = `<a href="${run.html_url}" target="_blank" rel="noopener">View the run log →</a>`;
+        if (job.status !== "completed") {
+          setStatus("amber", "Running…", "The Action is assuming your role…");
+          continue;
+        }
+        if (job.conclusion === "success") {
+          setStatus("green", "Green — your trust policy works", `The Action assumed oidc-lab-${handle} and read the bucket.`);
+        } else {
+          setStatus("red", "Red — not yet", `The Action could not assume oidc-lab-${handle}. Check the federated principal and the sub condition, then click Check again.`);
+        }
+        return;
+      }
+      setStatus("amber", "Still running", "The run is taking longer than expected; open the run log to follow it.");
+    } catch (e) {
+      setStatus("amber", "Couldn't run the check", String(e.message || e));
+    } finally {
+      $("go").disabled = false;
+    }
+  }
+
+  $("go").addEventListener("click", () => {
+    const h = $("handle").value.trim().toLowerCase();
+    if (h) check(h);
+  });
+  $("handle").addEventListener("keydown", (e) => { if (e.key === "Enter") $("go").click(); });
+</script>
+</body>
+</html>

@@ -1,8 +1,0 @@
-# One participant handle per line (email local-part, lowercased).
-# The scheduled oidc-check workflow fans out a matrix job per handle and tries
-# to assume oidc-lab-<handle> over OIDC. Lines starting with # are ignored.
-#
-# Add the smoketest handle while validating, then real attendees before class.
-# (Empty for now — the end-to-end OIDC path was validated with `smoketest` and
-# that role was torn down, so no handle is listed. Add real attendees here and
-# re-apply the Terraform before class.)

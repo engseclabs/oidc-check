@@ -41,7 +41,7 @@
 <body>
 <main>
   <h1>Lab 01 — OIDC check</h1>
-  <p class="sub">Enter your handle to get the values for your trust policy, then watch it go green.</p>
+  <p class="sub">Enter your handle and watch your trust policy go green.</p>
 
   <label for="handle">Your handle</label>
   <div class="row">
@@ -50,18 +50,6 @@
   </div>
 
   <section id="result" class="hidden">
-    <div class="card">
-      <h2>Put these in your role's trust policy</h2>
-      <div class="kv"><b>Role to allow</b> <code id="roleArn"></code></div>
-      <div class="kv"><b>Federated</b> <code id="provArn"></code></div>
-      <div class="kv"><b>aud equals</b> <code>sts.amazonaws.com</code></div>
-      <div class="kv"><b>sub like</b> <code id="subClaim"></code></div>
-      <details>
-        <summary class="hint">Show the full trust policy</summary>
-        <pre id="trustJson"></pre>
-      </details>
-    </div>
-
     <div class="card">
       <h2>Result for <code id="handleEcho"></code></h2>
       <div class="status"><span id="dot" class="dot amber"></span><span id="statusText">Checking…</span></div>
@@ -82,27 +70,9 @@
   const REPO = "oidc-check";
   const WORKFLOW = "oidc-check.yml";
   const DISPATCH_URL = "https://652zi1o3cf.execute-api.us-east-1.amazonaws.com/"; // injected at deploy time (the proxy API Gateway endpoint)
-  const ACCOUNT = "857876979208";
-  const PROVIDER_ARN = `arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`;
-  const SUB = `repo:${OWNER}/${REPO}:*`;
   const API = `https://api.github.com/repos/${OWNER}/${REPO}`;
 
   const $ = (id) => document.getElementById(id);
-
-  function trustPolicy(handle) {
-    return JSON.stringify({
-      Version: "2012-10-17",
-      Statement: [{
-        Effect: "Allow",
-        Principal: { Federated: PROVIDER_ARN },
-        Action: "sts:AssumeRoleWithWebIdentity",
-        Condition: {
-          StringEquals: { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
-          StringLike: { "token.actions.githubusercontent.com:sub": SUB }
-        }
-      }]
-    }, null, 2);
-  }
 
   function setStatus(kind, text, detail = "") {
     $("dot").className = "dot " + kind;
@@ -123,39 +93,48 @@
     if (!resp.ok) throw new Error(`dispatch failed (${resp.status}); ask your instructor`);
   }
 
-  // Find the run for this handle created at/after `since`, and its job result.
-  async function findRun(handle, since) {
+  // List the runs whose job is `check (handle)`, newest first. We don't filter by
+  // client time: GitHub's created_at is whole-second and the browser clock can be
+  // skewed, so a freshly-dispatched run can look "older" than the click and get
+  // skipped — that's what left the page stuck on amber. Instead, the caller
+  // snapshots the run IDs that exist *before* dispatch and waits for a new one.
+  async function runsForHandle(handle) {
     const resp = await fetch(`${API}/actions/workflows/${WORKFLOW}/runs?event=workflow_dispatch&per_page=20`);
     if (!resp.ok) throw new Error(`runs API ${resp.status}`);
     const runs = (await resp.json()).workflow_runs || [];
+    const out = [];
     for (const run of runs) {
-      if (new Date(run.created_at).getTime() < since - 60000) continue; // skip clearly-older runs
       const jobsResp = await fetch(`${API}/actions/runs/${run.id}/jobs?per_page=100`);
       if (!jobsResp.ok) continue;
       const job = ((await jobsResp.json()).jobs || []).find(j => j.name === `check (${handle})`);
-      if (job) return { run, job };
+      if (job) out.push({ run, job });
     }
-    return null;
+    return out;
+  }
+
+  // The newest run for this handle whose id is not in `seen` — i.e. the one we
+  // just dispatched, identified without trusting the clock.
+  async function findNewRun(handle, seen) {
+    const all = await runsForHandle(handle);
+    return all.find(({ run }) => !seen.has(run.id)) || null;
   }
 
   async function check(handle) {
     $("result").classList.remove("hidden");
     $("handleEcho").textContent = handle;
-    $("roleArn").textContent = `arn:aws:iam::${ACCOUNT}:role/oidc-lab-${handle}`;
-    $("provArn").textContent = PROVIDER_ARN;
-    $("subClaim").textContent = SUB;
-    $("trustJson").textContent = trustPolicy(handle);
     $("runLink").innerHTML = "";
     $("go").disabled = true;
     setStatus("amber", "Starting a check…", "Triggering a run that assumes your role.");
 
-    const since = Date.now();
     try {
+      // Snapshot existing runs for this handle so we can spot the new one by id
+      // (clock-independent) rather than by timestamp.
+      const seen = new Set((await runsForHandle(handle)).map(({ run }) => run.id));
       await dispatch(handle);
       // Poll for the run we just started, then for it to finish (~up to 2 min).
       for (let i = 0; i < 40; i++) {
         await sleep(3000);
-        const found = await findRun(handle, since);
+        const found = await findNewRun(handle, seen);
         if (!found) { setStatus("amber", "Starting a check…", "Waiting for the run to appear…"); continue; }
         const { run, job } = found;
         $("runLink").innerHTML = `<a href="${run.html_url}" target="_blank" rel="noopener">View the run log →</a>`;

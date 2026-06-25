@@ -93,30 +93,31 @@
     if (!resp.ok) throw new Error(`dispatch failed (${resp.status}); ask your instructor`);
   }
 
-  // List the runs whose job is `check (handle)`, newest first. We don't filter by
+  // The Actions API is polled unauthenticated, so it's capped at 60 req/hour per
+  // IP — and a whole class on shared Wi-Fi shares that budget. So keep calls
+  // minimal: list runs (1 call) to learn run IDs, and only fetch a run's jobs
+  // once we've pinned down the one we just started. POLL_MS is generous for the
+  // same reason; a check finishes in seconds, so a slower poll just adds latency.
+  const POLL_MS = 5000;
+  const MAX_POLLS = 24; // ~2 min ceiling
+
+  // The IDs of the most-recent dispatch runs, newest first. We don't filter by
   // client time: GitHub's created_at is whole-second and the browser clock can be
   // skewed, so a freshly-dispatched run can look "older" than the click and get
-  // skipped — that's what left the page stuck on amber. Instead, the caller
-  // snapshots the run IDs that exist *before* dispatch and waits for a new one.
-  async function runsForHandle(handle) {
+  // skipped — that's what left the page stuck on amber. The caller snapshots the
+  // IDs that exist *before* dispatch and waits for one that isn't in that set.
+  async function recentRunIds() {
     const resp = await fetch(`${API}/actions/workflows/${WORKFLOW}/runs?event=workflow_dispatch&per_page=20`);
     if (!resp.ok) throw new Error(`runs API ${resp.status}`);
-    const runs = (await resp.json()).workflow_runs || [];
-    const out = [];
-    for (const run of runs) {
-      const jobsResp = await fetch(`${API}/actions/runs/${run.id}/jobs?per_page=100`);
-      if (!jobsResp.ok) continue;
-      const job = ((await jobsResp.json()).jobs || []).find(j => j.name === `check (${handle})`);
-      if (job) out.push({ run, job });
-    }
-    return out;
+    return (await resp.json()).workflow_runs || [];
   }
 
-  // The newest run for this handle whose id is not in `seen` — i.e. the one we
-  // just dispatched, identified without trusting the clock.
-  async function findNewRun(handle, seen) {
-    const all = await runsForHandle(handle);
-    return all.find(({ run }) => !seen.has(run.id)) || null;
+  // The job named `check (handle)` for a specific run, or null. One API call,
+  // scoped to the single run we care about (not every run in the list).
+  async function jobForRun(runId, handle) {
+    const resp = await fetch(`${API}/actions/runs/${runId}/jobs?per_page=100`);
+    if (!resp.ok) return null;
+    return ((await resp.json()).jobs || []).find(j => j.name === `check (${handle})`) || null;
   }
 
   async function check(handle) {
@@ -127,18 +128,25 @@
     setStatus("amber", "Starting a check…", "Triggering a run that assumes your role.");
 
     try {
-      // Snapshot existing runs for this handle so we can spot the new one by id
+      // Snapshot existing run IDs so we can spot the new one by id
       // (clock-independent) rather than by timestamp.
-      const seen = new Set((await runsForHandle(handle)).map(({ run }) => run.id));
+      const seen = new Set((await recentRunIds()).map(r => r.id));
       await dispatch(handle);
       // Poll for the run we just started, then for it to finish (~up to 2 min).
-      for (let i = 0; i < 40; i++) {
-        await sleep(3000);
-        const found = await findNewRun(handle, seen);
-        if (!found) { setStatus("amber", "Starting a check…", "Waiting for the run to appear…"); continue; }
-        const { run, job } = found;
-        $("runLink").innerHTML = `<a href="${run.html_url}" target="_blank" rel="noopener">View the run log →</a>`;
-        if (job.status !== "completed") {
+      let ourRun = null;
+      for (let i = 0; i < MAX_POLLS; i++) {
+        await sleep(POLL_MS);
+
+        // Until we've identified our run, just list runs (1 call) and look for a
+        // new id. Once found, switch to polling only that run's job.
+        if (!ourRun) {
+          ourRun = (await recentRunIds()).find(r => !seen.has(r.id)) || null;
+          if (!ourRun) { setStatus("amber", "Starting a check…", "Waiting for the run to appear…"); continue; }
+          $("runLink").innerHTML = `<a href="${ourRun.html_url}" target="_blank" rel="noopener">View the run log →</a>`;
+        }
+
+        const job = await jobForRun(ourRun.id, handle);
+        if (!job || job.status !== "completed") {
           setStatus("amber", "Running…", "The Action is assuming your role…");
           continue;
         }

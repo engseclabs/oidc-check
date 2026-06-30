@@ -62,15 +62,20 @@
 </main>
 
 <script>
-  // Public repo: the Actions API is readable with no token. Starting a run needs
-  // actions:write — we never put that token in the page (it would let anyone run
-  // arbitrary workflows on our runners). Instead we POST the handle to a small
-  // proxy that holds the token server-side and dispatches only this workflow.
-  const OWNER = "engseclabs";
-  const REPO = "oidc-check";
-  const WORKFLOW = "oidc-check.yml";
-  const DISPATCH_URL = "https://652zi1o3cf.execute-api.us-east-1.amazonaws.com/"; // injected at deploy time (the proxy API Gateway endpoint)
-  const API = `https://api.github.com/repos/${OWNER}/${REPO}`;
+  // Starting a run needs actions:write — we never put that token in the page (it
+  // would let anyone run arbitrary workflows on our runners). Instead we POST the
+  // handle to a small proxy that holds the token server-side and dispatches only
+  // this workflow.
+  //
+  // We also POLL through that same proxy (GET /status) rather than hitting the
+  // GitHub Actions API directly. Direct polling is unauthenticated and capped at
+  // 60 req/hour PER IP, so a whole class on shared Wi-Fi exhausted the budget; the
+  // poll calls started 403ing and the page sat on amber even though the run had
+  // failed. The proxy polls with its server-side token (5000 req/hour), so a
+  // failed run goes red right away.
+  const PROXY_BASE = "https://652zi1o3cf.execute-api.us-east-1.amazonaws.com"; // injected at deploy time (proxy API Gateway endpoint)
+  const DISPATCH_URL = PROXY_BASE;
+  const STATUS_URL = `${PROXY_BASE.replace(/\/$/, "")}/status`;
 
   const $ = (id) => document.getElementById(id);
 
@@ -82,8 +87,7 @@
 
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-  // Start a fresh run for this handle. Returns the time we dispatched, so we can
-  // find the run we just created (rather than an older one for the same handle).
+  // Start a fresh run for this handle.
   async function dispatch(handle) {
     const resp = await fetch(DISPATCH_URL, {
       method: "POST",
@@ -93,32 +97,21 @@
     if (!resp.ok) throw new Error(`dispatch failed (${resp.status}); ask your instructor`);
   }
 
-  // The Actions API is polled unauthenticated, so it's capped at 60 req/hour per
-  // IP — and a whole class on shared Wi-Fi shares that budget. So keep calls
-  // minimal: list runs (1 call) to learn run IDs, and only fetch a run's jobs
-  // once we've pinned down the one we just started. POLL_MS is generous for the
-  // same reason; a check finishes in seconds, so a slower poll just adds latency.
-  const POLL_MS = 5000;
-  const MAX_POLLS = 24; // ~2 min ceiling
-
-  // The IDs of the most-recent dispatch runs, newest first. We don't filter by
-  // client time: GitHub's created_at is whole-second and the browser clock can be
-  // skewed, so a freshly-dispatched run can look "older" than the click and get
-  // skipped — that's what left the page stuck on amber. The caller snapshots the
-  // IDs that exist *before* dispatch and waits for one that isn't in that set.
-  async function recentRunIds() {
-    const resp = await fetch(`${API}/actions/workflows/${WORKFLOW}/runs?event=workflow_dispatch&per_page=20`);
-    if (!resp.ok) throw new Error(`runs API ${resp.status}`);
-    return (await resp.json()).workflow_runs || [];
+  // Ask the proxy for this handle's run state. `after` is the newest run id we
+  // saw before dispatching, so the proxy skips older runs for the same handle —
+  // run ids are monotonic, so this is clock-independent (no timestamp skew).
+  // Returns { state, conclusion?, run_id?, html_url? }.
+  async function status(handle, after) {
+    const url = `${STATUS_URL}?handle=${encodeURIComponent(handle)}${after ? `&after=${after}` : ""}`;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`status check failed (${resp.status}); ask your instructor`);
+    return resp.json();
   }
 
-  // The job named `check (handle)` for a specific run, or null. One API call,
-  // scoped to the single run we care about (not every run in the list).
-  async function jobForRun(runId, handle) {
-    const resp = await fetch(`${API}/actions/runs/${runId}/jobs?per_page=100`);
-    if (!resp.ok) return null;
-    return ((await resp.json()).jobs || []).find(j => j.name === `check (${handle})`) || null;
-  }
+  // A check finishes in seconds; the proxy is authenticated so we can poll a bit
+  // faster than before without any rate-limit worry.
+  const POLL_MS = 3000;
+  const MAX_POLLS = 40; // ~2 min ceiling
 
   async function check(handle) {
     $("result").classList.remove("hidden");
@@ -128,29 +121,26 @@
     setStatus("amber", "Starting a check…", "Triggering a run that assumes your role.");
 
     try {
-      // Snapshot existing run IDs so we can spot the new one by id
-      // (clock-independent) rather than by timestamp.
-      const seen = new Set((await recentRunIds()).map(r => r.id));
+      // The newest existing run id for this handle, so we only report the run we
+      // are about to start (not a stale earlier one).
+      const before = await status(handle).then(s => s.run_id || 0).catch(() => 0);
       await dispatch(handle);
-      // Poll for the run we just started, then for it to finish (~up to 2 min).
-      let ourRun = null;
+
+      let linked = false;
       for (let i = 0; i < MAX_POLLS; i++) {
         await sleep(POLL_MS);
 
-        // Until we've identified our run, just list runs (1 call) and look for a
-        // new id. Once found, switch to polling only that run's job.
-        if (!ourRun) {
-          ourRun = (await recentRunIds()).find(r => !seen.has(r.id)) || null;
-          if (!ourRun) { setStatus("amber", "Starting a check…", "Waiting for the run to appear…"); continue; }
-          $("runLink").innerHTML = `<a href="${ourRun.html_url}" target="_blank" rel="noopener">View the run log →</a>`;
+        const s = await status(handle, before);
+        if (s.html_url && !linked) {
+          $("runLink").innerHTML = `<a href="${s.html_url}" target="_blank" rel="noopener">View the run log →</a>`;
+          linked = true;
         }
-
-        const job = await jobForRun(ourRun.id, handle);
-        if (!job || job.status !== "completed") {
-          setStatus("amber", "Running…", "The Action is assuming your role…");
+        if (s.state !== "completed") {
+          setStatus("amber", linked ? "Running…" : "Starting a check…",
+                    linked ? "The Action is assuming your role…" : "Waiting for the run to appear…");
           continue;
         }
-        if (job.conclusion === "success") {
+        if (s.conclusion === "success") {
           setStatus("green", "Green — your trust policy works", `The Action assumed oidc-lab-${handle} and read the bucket.`);
         } else {
           setStatus("red", "Red — not yet", `The Action could not assume oidc-lab-${handle}. Check the federated principal and the sub condition, then click Check again.`);
@@ -159,7 +149,7 @@
       }
       setStatus("amber", "Still running", "The run is taking longer than expected; open the run log to follow it.");
     } catch (e) {
-      setStatus("amber", "Couldn't run the check", String(e.message || e));
+      setStatus("red", "Couldn't run the check", String(e.message || e));
     } finally {
       $("go").disabled = false;
     }
